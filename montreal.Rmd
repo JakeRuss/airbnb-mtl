@@ -1,0 +1,158 @@
+---
+title: "Montreal's Airbnb Listings in October 2015"
+author: "Jake Russ"
+date: "March 12, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(readr)
+library(dplyr)
+library(magrittr)
+library(rgdal)
+library(leaflet)
+library(ggplot2)
+library(broom)
+library(stargazer)
+
+# Load AirBnB data
+# Source: http://insideairbnb.com/montreal/
+listings     <- read_csv("listings.csv") 
+listings_viz <- read_csv("listings_viz.csv")
+```
+
+```{r clean, include=FALSE, echo=FALSE}
+
+reg_data <- listings %>%
+  select(id, property_type, bedrooms, bathrooms, host_is_superhost) %>%
+  left_join(x = listings_viz, y = ., by = "id") %>%
+  filter(price < 1000) %>%
+  group_by(neighbourhood) %>%
+  mutate(obs = n()) %>%
+  group_by(property_type, add = FALSE) %>%
+  mutate(pt.obs = n()) %>%
+  # Remove neighbourhoods and property types with few obervations
+  filter(obs >= 20, pt.obs >= 20) %>%
+  ungroup()
+
+```
+
+Flatbook's recent study found that [bad spellers get fewer bookings](http://blog.flatbook.co/2016/03/bad-spellers-get-fewer-airbnb-bookings/) 
+in Manhattan. I decided to return the favor to Flatbook HQ by investigating
+what drives Airbnb rental prices in Montreal. Fortunately, 
+[Inside Airbnb](http://insideairbnb.com/about.html) hosts open sourced Airbnb 
+listing data. The `r nrow(listings)` listing sample for this quick study comes 
+from October 2015.
+
+The first step in any analysis is to explore the raw data and clean it up as 
+neccesary. After briefly exploring the data, I made two filtering 
+decisions. First, I removed listings with prices above $1,000. That figure is 
+arbitrary but it removes some listings that dramatically alter group averages.
+Second, because property type and neighbourhood are factors that will end up in
+the pricing model, I set a minimum threshold of 20 obervations for these group 
+variables. This removed less frequently used descriptions such as, "Camper/RV" 
+or "villa" and left us with the expected standards, "Apartment", "House", etc. 
+
+My "cleaned" data set includes `r nrow(reg_data)` listings, which means I 
+trimmed about `r round(((nrow(listings) - nrow(reg_data)) / nrow(listings)) * 100, digits = 2)` 
+percent of the original observations.
+
+### Sanity check: What is the median daily price by Montreal neighbourhood?
+
+I think vizualiations are the natural next step in an analysis and median price
+by neighbourhood is a sensible test to sanity check the data. Given my group 
+level restrictions, the data contains `r length(unique(reg_data$neighbourhood))`
+neighbourhoods for Montreal. 
+
+
+```{r medians, echo=FALSE}
+
+med_prices <- reg_data %>%
+  group_by(neighbourhood) %>%
+  summarise(med.price = median(price, na.rm = TRUE)) %>%
+  arrange(desc(med.price)) %>%
+  mutate(nhoods = factor(neighbourhood, levels = neighbourhood[order(med.price, decreasing = TRUE)]))
+
+# plot the medians in descending order
+med_prices %>%
+  ggplot(., aes(x = nhoods, y = med.price)) +
+  geom_bar(stat = "identity") +
+  theme_bw() +
+  labs(x = "Neighbourhood", y = "Median daily price ($)") +
+  theme(axis.text.x = element_text(angle = -45, hjust = 0))
+
+
+```
+
+My knowledge of Montreal is admittedly limited but this plot appears to give the 
+"expected" result because high-income areas like Ville-Marie (Downtown Montreal)
+and Westmount are at the top of the scale and a low-income area like Verdun is 
+near the bottom.
+
+### Linear regression results
+
+The regression model I used includes the six variables I think should explain 
+most of the variation in price, number of bedrooms, number of bathrooms, room 
+type, property type, neighbourhood location, and Airbnb's superhost designation.
+
+To ease the reading of the results I do not report the individual neighbourhood 
+factors.
+
+```{r regression, results='asis', echo=FALSE}
+model   <- "price ~ bedrooms + bathrooms + factor(room_type) + factor(property_type) + factor(neighbourhood) + host_is_superhost"
+fit     <- lm(formula = model, data = reg_data)
+
+results <- tidy(fit)
+
+stargazer(fit, type = "html", omit = "neighbourhood")
+
+avg_price <- (results$estimate[1] + results$estimate[2] + results$estimate[3]) %>% 
+  round(digits = 2)
+
+sh_marginal <- results$estimate[29] %>% round(digits = 2)
+
+wm_price    <- (avg_price + results$estimate[28]) %>% round(digits = 2)
+ls_price    <- (avg_price + results$estimate[16]) %>% round(digits = 2)
+```
+
+#### Interpret results
+
+For the average one bedroom, one bathroom apartment the predicted price is 
+$`r avg_price` per night. As we should expect, private and shared rooms price 
+for much less than being able to rent the entire space. If the host has their 
+"superhost" designation you should expect to pay about $`r sh_marginal` more 
+per night. 
+
+For comparison, that average one bedroom, one bathroom apartment will cost you 
+about $`r wm_price` in Westmount and $`r ls_price` in LaSalle. 
+
+#### Limitations
+
+This study only uses data from a single month in 2015. There are likely seasonal 
+trends that would materially affect the results presented here. And ideally, I 
+should have also accounted for any major event taking place in October 2015 that 
+would have altered the results for a particular neighbourhood.
+
+### Map the data with Leaflet
+
+Finally, to provide a degree of interactivity to this report I have included a 
+map plotting the data that I used above.
+
+```{r map, echo=FALSE}
+
+reg_data %>%
+  leaflet() %>%
+  addTiles() %>%
+  # Set view centered on Flatbook HQ
+  setView(-73.578, 45.514, zoom = 17) %>%
+  addCircleMarkers(lng         = ~longitude,
+                   lat         = ~latitude,
+                   #color       = ~pal(price),
+                   #fillColor   = ~pal(price), 
+                   radius      = 7,
+                   stroke      = FALSE,
+                   popup       = ~as.character(price),
+                   opacity     = 0.6,
+                   fillOpacity = 0.8)
+
+```
